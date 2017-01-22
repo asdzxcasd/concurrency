@@ -1,6 +1,10 @@
 package C10TODO;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashMap;
+import java.util.HashSet;
 
 public class TODO {
 
@@ -24,6 +28,39 @@ public class TODO {
   // A scheduled thread once per minute gets accumulated data and sends it to a stats system.
   // In the same time all internal data structures are cleared to reduce memory footprint.
   // You can use java.util.concurrent but not any external library.
+
+  // Uses atomic operations of ConcurrentHashMap
+  class HashMapCounters implements Counters {
+    private ConcurrentHashMap<String, Long> map;
+
+    public HashMapCounters() {
+      map = new ConcurrentHashMap<String, Long>();
+    }
+
+    public void increment(String tag) {
+      map.merge(tag, 1L, Long::sum);
+    }
+
+    public Map<String, Long> getCountersAndClear() {
+      Map<String, Long> result = new HashMap<String, Long>();
+
+      // synchronization is used to prevent several threads from running getCountersAndClear at the same time
+      synchronized (this) {
+        // all keys are copied, because removing of elements from a collection cannot be done atomically while 
+        // iterating this collection
+        Set<String> keySet = new HashSet<String>(map.keySet());
+        for (String key : keySet) {
+          Long removedValue = map.remove(key);
+          if (removedValue != null)
+            result.put(key, removedValue);
+        }
+      }
+
+      return result;
+    }
+  }
+
+
   //
   // Exercise 2.
   // Given:
@@ -43,4 +80,50 @@ public class TODO {
   // Finally you let worker threads to pass a barrier one by one (the bucket leaks drops one by one).
   // You can NOT use java.util.concurrent.
 
+  class BucketBarrier implements Bucket, Drop {
+    private Object bucketLock = new Object();
+    private long bucketHeadId = 0; // Number of times awaitDrop was notified about new drops
+    private long bucketTailId = 0; // Minimal free id of a drop, which will be used next
+
+    private Object dropLock = new Object();
+    private long dropHeadId = 0; // Minimal id of a drop, which is not allowed to pass yet
+    private long dropTailId = 0; // Minimal free id of a drop, which will be used next
+
+    public void awaitDrop() {
+      try {
+        synchronized (bucketLock) {
+          while (bucketHeadId >= bucketTailId)
+            bucketLock.wait();
+        }
+        ++bucketHeadId;
+      }
+      catch (InterruptedException e) {
+      }
+    }
+
+    public void leak() {
+      synchronized (dropLock) {
+        ++dropHeadId;
+        // notifyAll is used because the thread with minimal id must be selected from all waiting threads
+        dropLock.notifyAll(); // notifies arrived()
+      }
+    }
+
+    public void arrived() {
+      try {
+        synchronized (bucketLock) {
+          ++bucketTailId;
+          bucketLock.notify(); // notifies awaitDrop()
+        }
+        synchronized (dropLock) {
+          ++dropTailId;
+          long currentId = dropTailId;
+          while (dropHeadId < currentId)
+            dropLock.wait();
+        }
+      }
+      catch (InterruptedException e) {
+      }
+    }
+  }
 }
